@@ -1,0 +1,11 @@
+node_modules/
+browser-profile/
+browser-profile-*/
+uploads/
+screenshots/
+*.log
+results.csv
+batch-config.csv
+test-batch.csv
+accounts.json
+.claude/
