@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.spec
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Build output
+dist/
+build/
+
+# User data
+browser-profiles/
+uploads/
+screenshots/
+accounts.json.bak
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+last-batch.csv
+results.csv

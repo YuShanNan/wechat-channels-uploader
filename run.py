@@ -1,0 +1,93 @@
+# run.py - 桌面启动器
+# 配置 WebView2 环境后启动主程序
+import sys
+import os
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 添加项目根目录到 Python 路径
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
+
+# 扫描 site-packages 查找 webview DLL 目录
+# frozen 模式下 _MEIPASS 内也有 webview/lib
+if getattr(sys, 'frozen', False):
+    _webview_lib = os.path.join(sys._MEIPASS, 'webview', 'lib')
+    if os.path.isdir(_webview_lib):
+        os.environ["PATH"] = _webview_lib + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, 'add_dll_directory'):
+            try:
+                os.add_dll_directory(_webview_lib)
+            except Exception:
+                pass
+else:
+    try:
+        import site
+        for scheme in site.getsitepackages():
+            wv_path = os.path.join(scheme, "webview", "lib")
+            if os.path.isdir(wv_path):
+                os.environ["PATH"] = wv_path + os.pathsep + os.environ.get("PATH", "")
+                if hasattr(os, 'add_dll_directory'):
+                    try:
+                        os.add_dll_directory(wv_path)
+                    except Exception:
+                        pass
+                break
+    except Exception:
+        pass
+
+# WebView2 稳定性标志，避免某些显卡/驱动导致 STATUS_BREAKPOINT 崩溃
+os.environ.setdefault(
+    'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
+    '--disable-gpu-rasterization --disable-software-rasterizer'
+)
+
+# frozen (PyInstaller) vs 开发模式: 区分可写数据目录和只读资源目录
+if getattr(sys, 'frozen', False):
+    # 可写数据: exe 所在目录（用户解压后的文件夹）
+    os.environ['APP_BASE_DIR'] = os.path.dirname(sys.executable)
+    # 只读资源: PyInstaller 临时解压目录 (_internal/)
+    os.environ['APP_RES_DIR'] = sys._MEIPASS
+    # Playwright 浏览器: 捆绑在 _internal/ms-playwright/ 下
+    _pw_browsers = os.path.join(sys._MEIPASS, 'ms-playwright')
+    if os.path.isdir(_pw_browsers):
+        os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _pw_browsers
+else:
+    os.environ.setdefault('APP_BASE_DIR', base_dir)
+    os.environ.setdefault('APP_RES_DIR', base_dir)
+
+os.environ.setdefault('APP_DATA_DIR', os.path.join(os.environ['APP_BASE_DIR'], 'data'))
+
+# frozen 模式下没有控制台，将输出重定向到日志文件
+if getattr(sys, 'frozen', False):
+    _log_path = os.path.join(os.environ['APP_BASE_DIR'], 'app.log')
+    sys.stdout = open(_log_path, 'a', encoding='utf-8')
+    sys.stderr = sys.stdout
+
+try:
+    import main
+    main.main()
+
+except Exception:
+    import traceback
+    from datetime import datetime
+    error_msg = traceback.format_exc()
+
+    # 写入错误日志
+    try:
+        log_file = os.path.join(os.environ.get('APP_BASE_DIR', base_dir), "app.log")
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.now()}] 启动失败:\n")
+            f.write(error_msg)
+            f.write("\n")
+    except Exception:
+        pass
+
+    print("=" * 60)
+    print("启动失败！错误信息：")
+    print("=" * 60)
+    print(error_msg)
+    print("=" * 60)
+
+    if sys.stdin and sys.stdin.isatty():
+        input("按回车键退出...")
