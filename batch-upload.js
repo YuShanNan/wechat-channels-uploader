@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const { parse } = require('csv-parse/sync');
 
 const PROFILE_DIR = path.join(__dirname, 'browser-profile');
@@ -80,10 +80,9 @@ function loadPublishedTitles(resultsPath, resume) {
 // ── ffprobe ──
 function probeVideo(filePath) {
   try {
-    const out = execSync(
-      `ffprobe -v quiet -print_format json -show_format -show_streams "${filePath.replace(/"/g, '\\"')}"`,
-      { timeout: 15000, encoding: 'utf-8' }
-    );
+    const out = execFileSync('ffprobe', [
+      '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath,
+    ], { timeout: 15000, encoding: 'utf-8' });
     const data = JSON.parse(out);
     const vs = (data.streams || []).find(s => s.codec_type === 'video');
     const fmt = data.format || {};
@@ -105,6 +104,12 @@ function probeVideo(filePath) {
 function loadCSV(csvPath) {
   if (!fs.existsSync(csvPath)) throw new Error(`CSV not found: ${csvPath}`);
   return parse(fs.readFileSync(csvPath, 'utf-8'), {
+    columns: true, skip_empty_lines: true, relax_column_count: true, bom: true,
+  });
+}
+
+function loadCSVFromString(csvContent) {
+  return parse(csvContent, {
     columns: true, skip_empty_lines: true, relax_column_count: true, bom: true,
   });
 }
@@ -169,9 +174,10 @@ function classifyError(msg) {
 function isLogin(url) { return url.includes('login'); }
 
 // ── Browser helpers ──
-async function initBrowser(profileDir) {
+async function initBrowser(profileDir, options = {}) {
+  const { headless = true } = options;
   const browserContext = await chromium.launchPersistentContext(profileDir, {
-    headless: false, channel: 'chrome', viewport: { width: 1440, height: 900 }, locale: 'zh-CN',
+    headless, channel: 'chrome', viewport: { width: 1440, height: 900 }, locale: 'zh-CN',
   });
   return browserContext;
 }
@@ -179,13 +185,11 @@ async function initBrowser(profileDir) {
 async function unlockProfile(profileDir) {
   const lockFile = path.join(profileDir, 'SingletonLock');
   if (fs.existsSync(lockFile)) {
-    logger.warn('Profile locked — killing Chrome...');
+    logger.warn('Profile locked — removing lock file...');
     try {
-      execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' });
-      const t0 = Date.now();
-      while (Date.now() - t0 < 2000) {}
+      fs.unlinkSync(lockFile);
       logger.info('Profile unlocked');
-    } catch { logger.warn('Could not kill Chrome'); }
+    } catch { logger.warn('Could not remove lock file'); }
   }
 }
 
@@ -193,17 +197,24 @@ async function loginFlow(browserContext) {
   const page = browserContext.pages()[0];
   await page.goto('https://channels.weixin.qq.com/', { waitUntil: 'domcontentloaded' });
   logger.info('=== Scan QR code to login, then press Enter ===');
-  await new Promise(r => process.stdin.once('data', r));
+  await Promise.race([
+    new Promise(r => process.stdin.once('data', r)),
+    new Promise(r => setTimeout(r, 300000)),
+  ]);
   logger.info('Login saved');
 }
 
 // ── Upload helpers ──
-async function waitForUploadWithProgress(page) {
+async function waitForUploadWithProgress(page, abortSignal) {
   const startTime = Date.now();
   while (Date.now() - startTime < 300000) {
+    if (abortSignal && abortSignal.abort) {
+      logger.warn('  Upload aborted by user');
+      return 'aborted';
+    }
     if (await page.locator('.ant-slider').count().catch(() => 0) > 0) {
       logger.info(`  Upload complete (${Math.round((Date.now() - startTime) / 1000)}s)`);
-      return;
+      return 'ok';
     }
     logger.info(`  Uploading... ${Math.round((Date.now() - startTime) / 1000)}s`);
     await page.waitForTimeout(15000);
@@ -268,21 +279,80 @@ async function verifyPublish(page) {
 }
 
 async function processVideo(browserContext, record) {
-  const page = browserContext.pages()[0];
+  let page = browserContext.pages()[0];
+  if (!page) {
+    logger.warn('  No page in context, creating new page...');
+    page = await browserContext.newPage();
+  }
   const result = { video_path: record.video_path, title: record.title, status: 'unknown', error: '', _errorType: 'fatal', _loginExpired: false };
 
   try {
     logger.info(`\n=== ${record.title} ===`);
-    await page.goto('https://channels.weixin.qq.com/platform/post/create', {
+    // 先导航到平台首页，再通过导航进入发表页面
+    await page.goto('https://channels.weixin.qq.com/platform', {
       waitUntil: 'domcontentloaded', timeout: 30000,
     });
-    await page.waitForSelector('input[type=file]', { state: 'attached', timeout: 15000 });
+    await page.waitForTimeout(5000);
     if (isLogin(page.url())) { result.status = 'failed'; result.error = 'Not logged in'; result._loginExpired = true; return result; }
+
+    // Try direct URL first (might work if URL structure unchanged)
+    // If it redirects, go through the navigation flow
+    if (!page.url().includes('/post/create')) {
+      logger.info('  Looking for upload entry via navigation...');
+      // 尝试通过侧边栏导航到发表页面
+      // Flow: 内容管理 → 发表视频
+      const navSteps = [
+        // Step 1: 找 "内容管理" 或 "发表视频" 菜单
+        { action: 'click', selector: page.getByText('内容管理', { exact: true }), desc: '内容管理' },
+        { action: 'click', selector: page.getByText(/内容管理|发表视频|视频管理/), desc: '内容/发表/视频管理 (模糊)' },
+        { action: 'click', selector: page.getByText('发表视频', { exact: true }), desc: '发表视频' },
+        // Direct buttons on dashboard
+        { action: 'click', selector: page.getByRole('button', { name: /发布视频|发表视频|上传视频|创作/ }), desc: '发布/发表/上传/创作按钮' },
+      ];
+
+      for (const step of navSteps) {
+        try {
+          const el = step.selector.first();
+          if (await el.count() > 0) {
+            await el.click({ timeout: 3000 });
+            logger.info(`  Clicked: ${step.desc}`);
+            await page.waitForTimeout(3000);
+          }
+        } catch {}
+      }
+
+      // Check if we've landed on a page with file input
+      if (await page.locator('input[type=file]').count() === 0) {
+        // Try navigating to old URL as fallback
+        logger.info('  Trying legacy URL /platform/post/create...');
+        await page.goto('https://channels.weixin.qq.com/platform/post/create', {
+          waitUntil: 'domcontentloaded', timeout: 15000,
+        });
+        await page.waitForTimeout(3000);
+      }
+    }
+    // 等待上传区域出现 — 先截图确认页面状态
+    let fileInput = page.locator('input[type=file]').first();
+    try {
+      await fileInput.waitFor({ state: 'attached', timeout: 15000 });
+    } catch {
+      // 保存截图 + HTML 用于调试
+      if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+      const ts = Date.now();
+      const sfx = (record.title || 'unknown').replace(/[<>:"/\\|?*]/g, '_').slice(0, 30);
+      await page.screenshot({ path: path.join(SCREENSHOTS_DIR, `debug_${ts}_${sfx}.png`), fullPage: true });
+      fs.writeFileSync(path.join(SCREENSHOTS_DIR, `debug_${ts}_${sfx}.html`), await page.content(), 'utf-8');
+      logger.info(`  Debug: screenshots/debug_${ts}_${sfx}.png + .html (url: ${page.url()})`);
+      throw new Error(`input[type=file] not found after 15s — page may have changed. Screenshot saved.`);
+    }
 
     logger.info(`  Upload: ${record.video_path}`);
     if (!fs.existsSync(record.video_path)) throw new Error(`File not found: ${record.video_path}`);
     await page.locator('input[type=file]').first().setInputFiles(record.video_path);
-    await waitForUploadWithProgress(page);
+    const uploadResult = await waitForUploadWithProgress(page, record._abortSignal);
+    if (uploadResult === 'aborted') {
+      result.status = 'failed'; result.error = 'Aborted by user'; return result;
+    }
     await page.waitForTimeout(5000);
     if (isLogin(page.url())) { result.status = 'failed'; result.error = 'Login expired during upload'; result._loginExpired = true; return result; }
 
@@ -339,23 +409,25 @@ function handleLoginExpired() {
 
 // ── Batch process (used by both CLI and server) ──
 async function batchUpload(browserContext, records, options = {}) {
-  const { resultsPath = RESULTS_PATH, resume = false, results: existingResults = [], abortSignal, onProgress } = options;
+  const { resultsPath = RESULTS_PATH, resume = false, results: existingResults = [], abortSignal, onProgress, onLoginExpired } = options;
   const results = existingResults.slice();
   const publishedSet = loadPublishedTitles(resultsPath, resume);
   let loginExpired = false;
 
-  // Close extra tabs
+  // Close extra tabs, ensure at least one page exists
   const pages = browserContext.pages();
   for (let i = pages.length - 1; i >= 1; i--) await pages[i].close();
+  if (browserContext.pages().length === 0) await browserContext.newPage();
 
   const total = records.length;
   for (let i = 0; i < records.length; i++) {
-    if (abortSignal && abortSignal.aborted) {
+    if (abortSignal && abortSignal.abort) {
       logger.warn('Upload aborted by user');
       break;
     }
 
     const record = records[i];
+    record._abortSignal = abortSignal;
     if (record._skip) {
       results.push({ video_path: record.video_path, title: record.title, status: 'skipped', error: record._skipReason });
       if (onProgress) onProgress({ current: i + 1, total, status: 'skipped', title: record.title });
@@ -385,7 +457,7 @@ async function batchUpload(browserContext, records, options = {}) {
     }
 
     results.push(result);
-    if (result._loginExpired) { loginExpired = true; handleLoginExpired(); }
+    if (result._loginExpired) { loginExpired = true; handleLoginExpired(); if (onLoginExpired) onLoginExpired(record); }
     writeResults(results, resultsPath);
     if (onProgress) onProgress({ current: i + 1, total, status: result.status, title: record.title });
   }
@@ -452,7 +524,7 @@ module.exports = {
   // Constants
   PROFILE_DIR, LOG_PATH, RESULTS_PATH, SCREENSHOTS_DIR, PLATFORM, MAX_RETRIES,
   // Core
-  initBrowser, unlockProfile, loginFlow, batchUpload, processVideo, preflightRecords, loadCSV, validateTitle, writeResults, loadPublishedTitles,
+  initBrowser, unlockProfile, loginFlow, batchUpload, processVideo, preflightRecords, loadCSV, loadCSVFromString, validateTitle, writeResults, loadPublishedTitles,
   // Helpers
   classifyError, isLogin, waitForUploadWithProgress, selectShortDrama, setCover, hideLocation, verifyPublish,
   waitUntil, handleLoginExpired, probeVideo, logger, notifyUser,

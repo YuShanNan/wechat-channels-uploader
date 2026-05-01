@@ -17,11 +17,26 @@ function loadAccounts() {
     const data = fs.readFileSync(ACCOUNTS_PATH, 'utf-8');
     return JSON.parse(data);
   } catch {
+    // Corrupted file — restore from backup or defaults
+    const bak = ACCOUNTS_PATH + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const bakData = fs.readFileSync(bak, 'utf-8');
+        const restored = JSON.parse(bakData);
+        saveAccounts(restored);
+        return restored;
+      } catch {}
+    }
+    saveAccounts(DEFAULT_ACCOUNTS);
     return JSON.parse(JSON.stringify(DEFAULT_ACCOUNTS));
   }
 }
 
 function saveAccounts(accounts) {
+  // Backup before overwriting
+  if (fs.existsSync(ACCOUNTS_PATH)) {
+    try { fs.copyFileSync(ACCOUNTS_PATH, ACCOUNTS_PATH + '.bak'); } catch {}
+  }
   fs.writeFileSync(ACCOUNTS_PATH, JSON.stringify(accounts, null, 2), 'utf-8');
 }
 

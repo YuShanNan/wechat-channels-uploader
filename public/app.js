@@ -7,10 +7,37 @@ let uploadRunning = false;
 let currentView = 'dashboard';
 let logCollapsed = false;
 
+const addEntryBtnDefault = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加到队列`;
+
 /* ─── Helpers ─── */
 const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
 const $ = id => document.getElementById(id);
 const api = (url, opts = {}) => fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+const toLocalDatetime = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+
+/* ─── Modal ─── */
+let modalCallback = null;
+function showModal(title, body, onOk) {
+  $('modalTitle').innerHTML = esc(title);
+  $('modalBody').innerHTML = body;
+  $('modalOverlay').style.display = 'flex';
+  modalCallback = onOk || null;
+}
+$('modalOk').addEventListener('click', async () => {
+  $('modalOverlay').style.display = 'none';
+  if (modalCallback) await modalCallback();
+  modalCallback = null;
+});
+$('modalCancel').addEventListener('click', () => {
+  $('modalOverlay').style.display = 'none';
+  modalCallback = null;
+});
+$('modalOverlay').addEventListener('click', e => {
+  if (e.target === $('modalOverlay')) {
+    $('modalOverlay').style.display = 'none';
+    modalCallback = null;
+  }
+});
 
 /* ─── Toast ─── */
 function toast(msg, type) {
@@ -18,7 +45,7 @@ function toast(msg, type) {
   const container = $('toastContainer');
   const el = document.createElement('div');
   el.className = 'toast ' + type;
-  el.innerHTML = `<span class="toast-msg">${esc(msg)}</span><button class="toast-close">&times;</button>`;
+  el.innerHTML = `<span class="toast-msg">${esc(msg)}</span><button class="toast-close" aria-label="关闭">&times;</button>`;
   el.querySelector('.toast-close').addEventListener('click', () => {
     el.classList.add('leaving');
     setTimeout(() => el.remove(), 150);
@@ -38,6 +65,7 @@ function connectWS() {
       if (d.type === 'log') appendLog(d);
       if (d.type === 'progress') onProgress(d);
       if (d.type === 'upload-end') onUploadEnd(d);
+      if (d.type === 'login-expired') onLoginExpired(d);
     } catch {}
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
@@ -58,6 +86,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
 
 function switchView(view) {
   currentView = view;
+  document.querySelector('.main').scrollTop = 0;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelector(`.nav-item[data-view="${view}"]`).classList.add('active');
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -124,6 +153,17 @@ async function loadDashboard() {
 }
 
 $('dashRefreshBtn').addEventListener('click', loadDashboard);
+$('clearEntriesBtn').addEventListener('click', () => {
+  if (entries.length === 0) return;
+  showModal('清空队列', `确定要清空全部 ${entries.length} 个待上传条目吗？`, () => {
+    entries = [];
+    renderEntries();
+    $('timeline').innerHTML = '';
+    $('timeline').classList.remove('visible');
+    $('progressWrap').style.display = 'none';
+    toast('队列已清空', 'info');
+  });
+});
 
 /* ═══════════════════════════════════════════════
    ENTRIES
@@ -152,6 +192,7 @@ function renderEntries() {
   const el = $('entryList');
   $('entryCount').textContent = entries.length;
   $('startBtn').disabled = entries.length === 0 || uploadRunning;
+  $('clearEntriesBtn').style.display = entries.length > 0 && !uploadRunning ? '' : 'none';
 
   if (entries.length === 0) {
     el.innerHTML = '<div class="empty-state">暂无视频待上传</div>';
@@ -164,15 +205,21 @@ function renderEntries() {
       fail: ['失败', 'fail'],
     };
     const [sLabel, sClass] = statusMap[e._uploadStatus] || ['待上传', 'pending'];
-    return `<div class="entry-item" draggable="true" data-id="${e.id}">
+    const valError = e._validationError || '';
+    let displayDesc = e.description || '';
+    if (displayDesc.length > 50) displayDesc = displayDesc.slice(0, 50) + '…';
+    if (!displayDesc) displayDesc = e.title || '(无描述)';
+    return `<div class="entry-item${valError ? ' invalid' : ''}" draggable="true" data-id="${e.id}">
       <span class="entry-num">${i + 1}</span>
       <div class="entry-info">
-        <div class="entry-title">${esc(e.title || '(无标题)')}</div>
+        <div class="entry-title">${esc(displayDesc)}</div>
         <div class="entry-meta">
           <span>${esc(e.videoName || e.video_path.split(/[\\/]/).pop())}</span>
-          ${e.cover_path ? '<span>[封面]</span>' : ''}
-          ${e.short_drama_name ? `<span>${esc(e.short_drama_name)}</span>` : ''}
-          ${e.publish_time ? `<span>定时: ${esc(e.publish_time)}</span>` : ''}
+          ${e.title ? `<span>标题: ${esc(e.title)}</span>` : ''}
+          ${e.cover_path ? `<span>封面: ${esc(e.coverName || e.cover_path.split(/[\\/]/).pop())}</span>` : ''}
+          ${e.short_drama_name ? `<span>剧集: ${esc(e.short_drama_name)}</span>` : ''}
+          ${e.publish_time ? `<span>定时: ${esc(e.publish_time.replace('T', ' '))}</span>` : ''}
+          ${valError ? `<span class="val-error">${esc(valError)}</span>` : ''}
         </div>
       </div>
       <span class="entry-status ${sClass}"><span class="dot"></span>${sLabel}</span>
@@ -243,6 +290,53 @@ function setupDragReorder() {
 
 /* ─── Add entry button ─── */
 $('addEntryBtn').addEventListener('click', () => {
+  // 批量模式：一次性添加多个视频
+  if (batchVideoFiles.length > 0) {
+    const title = $('formTitle').value;
+    const drama = $('formDrama').value;
+    const baseTime = $('formTime').value;
+    const interval = parseInt($('formInterval').value) || 0;
+    const desc = $('formDesc').value;
+    const coverPath = $('coverPreview').dataset.path || '';
+    const coverName = $('coverPreview').dataset.name || '';
+
+    batchVideoFiles.forEach(({ path, name }, i) => {
+      let t = baseTime;
+      if (baseTime && interval > 0) {
+        const d = new Date(baseTime);
+        const now = new Date();
+        if (d <= now) {
+          d.setTime(now.getTime());
+          d.setMinutes(d.getMinutes() + 1 + i * interval);
+        } else {
+          d.setMinutes(d.getMinutes() + i * interval);
+        }
+        t = toLocalDatetime(d);
+      }
+      entries.push({
+        id: ++entryIdCounter,
+        video_path: path, videoName: name,
+        cover_path: coverPath, coverName,
+        title: title.trim(),
+        short_drama_name: drama || '',
+        publish_time: t,
+        description: desc || '',
+        _uploadStatus: 'pending',
+      });
+    });
+    renderEntries();
+    toast(`已添加 ${batchVideoFiles.length} 个视频到队列`, 'success');
+    batchVideoFiles.forEach(f => { if (f._blobUrl) URL.revokeObjectURL(f._blobUrl); });
+    batchVideoFiles = [];
+    $('batchVideoStrip').style.display = 'none';
+    $('addEntryBtn').innerHTML = addEntryBtnDefault;
+    clearDropZone('video'); clearDropZone('cover');
+    $('formTitle').value = ''; $('formDrama').value = '';
+    $('formDesc').value = '';
+    return;
+  }
+
+  // 单视频模式
   addEntry(
     $('videoPreview').dataset.path,
     $('videoPreview').dataset.name,
@@ -257,8 +351,14 @@ $('addEntryBtn').addEventListener('click', () => {
   const interval = parseInt($('formInterval').value) || 0;
   if (time && interval > 0) {
     const d = new Date(time);
-    d.setMinutes(d.getMinutes() + interval);
-    $('formTime').value = d.toISOString().slice(0, 16);
+    const now = new Date();
+    if (d <= now) {
+      d.setTime(now.getTime());
+      d.setMinutes(d.getMinutes() + 1);
+    } else {
+      d.setMinutes(d.getMinutes() + interval);
+    }
+    $('formTime').value = toLocalDatetime(d);
   }
   clearDropZone('video'); clearDropZone('cover');
   $('formTitle').value = ''; $('formDrama').value = '';
@@ -300,6 +400,19 @@ function setupDropZone(type) {
     e.preventDefault(); zone.classList.remove('drag-over');
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
+    // Validate file type
+    if (type === 'video') {
+      const invalid = [...files].filter(f => !f.type.startsWith('video/'));
+      if (invalid.length > 0) {
+        toast('不支持的文件类型: ' + invalid.map(f => f.name).join(', ') + '，请拖入 MP4 视频文件', 'error');
+        return;
+      }
+    } else if (type === 'cover') {
+      if (!files[0].type.startsWith('image/')) {
+        toast('请拖入 PNG / JPG 图片作为封面', 'error');
+        return;
+      }
+    }
     if (type === 'video' && files.length > 1) {
       handleBatchVideos(files);
     } else {
@@ -309,12 +422,22 @@ function setupDropZone(type) {
 }
 
 async function handleFile(type, file) {
+  // 单文件上传时清除批量暂存
+  if (type === 'video') {
+    batchVideoFiles.forEach(f => { if (f._blobUrl) URL.revokeObjectURL(f._blobUrl); });
+    batchVideoFiles = [];
+    $('batchVideoStrip').style.display = 'none';
+    $('addEntryBtn').innerHTML = addEntryBtnDefault;
+  }
   const preview = $(`${type}Preview`);
   const zone = $(`${type}Drop`);
   const el = preview.querySelector(type === 'video' ? 'video' : 'img');
   const nameEl = preview.querySelector('.drop-filename');
 
+  // Revoke previous blob URL
+  if (preview.dataset.blobUrl) URL.revokeObjectURL(preview.dataset.blobUrl);
   const url = URL.createObjectURL(file);
+  preview.dataset.blobUrl = url;
   el.src = url;
   nameEl.textContent = file.name;
   preview.style.display = 'flex';
@@ -322,86 +445,76 @@ async function handleFile(type, file) {
   zone.querySelector('.drop-text').style.display = 'none';
   zone.querySelector('.drop-hint').textContent = file.name;
 
-  const reader = new FileReader();
-  reader.onload = async (e) => {
-    const base64 = e.target.result.split(',')[1];
-    try {
-      const res = await api('/api/upload/file', {
-        method: 'POST',
-        body: JSON.stringify({ name: file.name, data: base64 }),
-      });
-      const data = await res.json();
-      preview.dataset.path = data.path;
-      preview.dataset.name = data.name;
-    } catch (err) {
-      preview.dataset.path = file.name;
-      preview.dataset.name = file.name;
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch('/api/upload/file', { method: 'POST', body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || '上传失败');
     }
-  };
-  reader.readAsDataURL(file);
+    const data = await res.json();
+    preview.dataset.path = data.path;
+    preview.dataset.name = data.name;
+  } catch (err) {
+    toast('文件上传失败: ' + (err.message || '网络错误'), 'error');
+    return;
+  }
 }
 
 function uploadVideo(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target.result.split(',')[1];
-      try {
-        const res = await api('/api/upload/file', {
-          method: 'POST',
-          body: JSON.stringify({ name: file.name, data: base64 }),
-        });
-        const data = await res.json();
-        resolve({ path: data.path, name: data.name });
-      } catch {
-        resolve({ path: file.name, name: file.name });
-      }
-    };
-    reader.readAsDataURL(file);
+  return new Promise(async (resolve) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await fetch('/api/upload/file', { method: 'POST', body: formData });
+      const data = await res.json();
+      resolve({ path: data.path, name: data.name });
+    } catch {
+      resolve({ path: file.name, name: file.name });
+    }
   });
 }
+
+// 批量拖拽暂存区 — 上传后不立即入队，等用户填完表单
+let batchVideoFiles = [];
 
 async function handleBatchVideos(files) {
   const list = [...files];
   const hintEl = $('videoDrop').querySelector('.drop-hint');
-  hintEl.textContent = '上传中 0/' + list.length + '...';
+  hintEl.textContent = '上传中 0/' + list.length + '…';
 
   const results = [];
   for (let i = 0; i < list.length; i++) {
     results.push(await uploadVideo(list[i]));
-    hintEl.textContent = '上传中 ' + (i + 1) + '/' + list.length + '...';
+    hintEl.textContent = '上传中 ' + (i + 1) + '/' + list.length + '…';
   }
 
-  const title = $('formTitle').value;
-  const drama = $('formDrama').value;
-  const baseTime = $('formTime').value;
-  const interval = parseInt($('formInterval').value) || 0;
-  const desc = $('formDesc').value;
-  const coverPath = $('coverPreview').dataset.path || '';
-  const coverName = $('coverPreview').dataset.name || '';
-
-  results.forEach(({ path, name }, i) => {
-    let t = baseTime;
-    if (baseTime && interval > 0) {
-      const d = new Date(baseTime);
-      d.setMinutes(d.getMinutes() + i * interval);
-      t = d.toISOString().slice(0, 16);
-    }
-    entries.push({
-      id: ++entryIdCounter,
-      video_path: path, videoName: name,
-      cover_path: coverPath, coverName,
-      title: title.trim(),
-      short_drama_name: drama || '',
-      publish_time: t,
-      description: desc || '',
-      _uploadStatus: 'pending',
+  // 暂存上传结果，填充横排预览条
+  batchVideoFiles = results;
+  const strip = $('batchVideoStrip');
+  strip.innerHTML = list.map((file, i) => {
+    const blobUrl = URL.createObjectURL(file);
+    results[i]._blobUrl = blobUrl; // 暂存以便后续清理
+    return `<div class="batch-video-card" data-index="${i}">
+      <video src="${blobUrl}" muted preload="metadata" title="${esc(results[i].name)}"></video>
+      <div class="batch-video-name">${esc(results[i].name)}</div>
+    </div>`;
+  }).join('');
+  strip.style.display = 'flex';
+  $('videoPreview').style.display = 'none';
+  // 点击卡片预览
+  strip.querySelectorAll('.batch-video-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const vid = card.querySelector('video');
+      if (vid.paused) { vid.play(); } else { vid.pause(); }
     });
   });
+  // 更新按钮文案
+  $('addEntryBtn').innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加 ${results.length} 个到队列`;
 
-  renderEntries();
-  hintEl.textContent = '已添加 ' + list.length + ' 个视频';
-  setTimeout(() => { if (hintEl.textContent.includes('已添加')) hintEl.textContent = 'MP4 · 可批量选择 · 最大 20GB'; }, 2500);
+  hintEl.textContent = results.length + ' 个视频已就绪';
+  toast(`${results.length} 个视频已就绪，请填写信息后点击"添加到队列"`, 'info');
 }
 
 function clearDropZone(type) {
@@ -409,6 +522,7 @@ function clearDropZone(type) {
   const preview = $(`${type}Preview`);
   const input = $(`${type}Input`);
   const defaultHints = { video: 'MP4 · 可批量选择 · 最大 20GB', cover: 'PNG / JPG' };
+  if (preview.dataset.blobUrl) { URL.revokeObjectURL(preview.dataset.blobUrl); delete preview.dataset.blobUrl; }
   preview.style.display = 'none';
   preview.dataset.path = ''; preview.dataset.name = ''; input.value = '';
   zone.querySelector('.drop-icon').style.display = '';
@@ -424,6 +538,9 @@ setupDropZone('cover');
    ═══════════════════════════════════════════════ */
 $('startBtn').addEventListener('click', startUpload);
 $('stopBtn').addEventListener('click', stopUpload);
+$('retryBtn').addEventListener('click', retryFailed);
+$('resumeBtn').addEventListener('click', resumeLastBatch);
+$('validateBtn').addEventListener('click', validateEntries);
 
 function generateCSV() {
   const header = 'video_path,title,description,short_drama_name,publish_time,cover_path';
@@ -443,12 +560,12 @@ async function startUpload() {
   if (entries.length === 0) return toast('请先添加视频', 'error');
 
   const csv = generateCSV();
-  setStatus('running', '上传中...');
+  setStatus('running', '上传中…');
   $('startBtn').disabled = true;
   $('stopBtn').disabled = false;
   $('liveLog').textContent = '';
   uploadRunning = true;
-  entries.forEach(e => e._uploadStatus = 'pending');
+  entries.forEach(e => { e._uploadStatus = 'pending'; delete e._validationError; });
   renderEntries();
 
   // Show timeline
@@ -460,6 +577,10 @@ async function startUpload() {
       <div class="timeline-node-meta">等待中</div>
     </div>`
   ).join('');
+
+  $('progressWrap').style.display = 'block';
+  $('retryBtn').style.display = 'none';
+  updateProgress(0, entries.length);
 
   try {
     const res = await api('/api/upload/start', {
@@ -478,9 +599,17 @@ async function startUpload() {
 }
 
 function stopUpload() {
-  api('/api/upload/stop', { method: 'POST' });
-  $('stopBtn').disabled = true;
-  toast('正在停止...', 'info');
+  showModal('停止上传', '确定要停止当前上传吗？<br>已完成的视频不会受影响，剩余视频将标记为失败。', () => {
+    api('/api/upload/stop', { method: 'POST' });
+    $('stopBtn').disabled = true;
+    toast('正在停止…', 'info');
+  });
+}
+
+function updateProgress(current, total) {
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  $('progressFill').style.width = pct + '%';
+  $('progressText').textContent = current + ' / ' + total + ' (' + pct + '%)';
 }
 
 function onProgress(data) {
@@ -496,14 +625,91 @@ function onProgress(data) {
       const statusClass = data.status === 'published' ? 'done' : data.status === 'failed' ? 'fail' : 'active';
       tlNode.classList.add(statusClass);
       const meta = tlNode.querySelector('.timeline-node-meta');
-      if (meta) meta.textContent = data.status === 'published' ? '已发布' : data.status === 'failed' ? '失败' : '处理中...';
+      if (meta) meta.textContent = data.status === 'published' ? '已发布' : data.status === 'failed' ? '失败' : '处理中…';
     }
   }
+  updateProgress(data.current, data.total);
+}
+
+async function validateEntries() {
+  if (entries.length === 0) return toast('请先添加视频', 'info');
+  $('validateBtn').disabled = true;
+  $('validateBtn').textContent = '预检中…';
+  const csv = generateCSV();
+  try {
+    const res = await api('/api/upload/validate', { method: 'POST', body: JSON.stringify({ csv }) });
+    if (!res.ok) return toast('预检失败', 'error');
+    const results = await res.json();
+    let issues = 0;
+    results.forEach((r, i) => {
+      if (i < entries.length) {
+        entries[i]._validationError = r.valid ? '' : r.error;
+        if (!r.valid) issues++;
+      }
+    });
+    renderEntries();
+    if (issues === 0) toast('全部 ' + entries.length + ' 个条目预检通过', 'success');
+    else toast(issues + ' 个条目存在问题，已高亮显示', 'warn');
+  } catch { toast('预检失败', 'error'); }
+  $('validateBtn').disabled = false;
+  $('validateBtn').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>预检';
+}
+
+// Clean server-renamed filename: "1680000000_a1b2c3_video.mp4" → "video.mp4"
+function cleanUploadName(filePath) {
+  const name = (filePath || '').split(/[\\/]/).pop();
+  return name.replace(/^\d+_[a-z0-9]{6}_/, '');
+}
+
+async function resumeLastBatch() {
+  try {
+    const res = await fetch('/api/upload/last-csv');
+    const data = await res.json();
+    if (!data.entries || data.entries.length === 0) return toast('没有可恢复的上次上传', 'info');
+    const newEntries = data.entries.map(r => ({
+      id: ++entryIdCounter,
+      video_path: r.video_path,
+      videoName: cleanUploadName(r.video_path),
+      cover_path: r.cover_path || '',
+      coverName: cleanUploadName(r.cover_path),
+      title: r.title || '',
+      description: r.description || '',
+      short_drama_name: r.short_drama_name || '',
+      publish_time: r.publish_time || '',
+      _uploadStatus: 'pending',
+      _validationError: r.valid ? '' : (r.error || '校验失败'),
+    }));
+    entries = [...entries, ...newEntries];
+    renderEntries();
+    const invalid = newEntries.filter(e => e._validationError).length;
+    toast(`已恢复 ${newEntries.length} 个条目${invalid > 0 ? '（' + invalid + ' 个校验未通过）' : ''}`, invalid > 0 ? 'error' : 'success');
+  } catch { toast('恢复失败', 'error'); }
+}
+
+async function retryFailed() {
+  const failed = entries.filter(e => e._uploadStatus === 'fail');
+  if (failed.length === 0) return toast('没有失败的条目', 'info');
+  entries = failed;
+  entries.forEach(e => { e._uploadStatus = 'pending'; delete e._validationError; });
+  $('entryCount').textContent = entries.length;
+  await startUpload();
+}
+
+function onLoginExpired(data) {
+  toast(`账号登录已过期！视频「${data.title || '未知'}」上传中断，请重新扫码登录`, 'error');
+  resetUI();
+  loadAccounts(); // refresh account list and select
+  setStatus('error', '登录过期');
 }
 
 function onUploadEnd(data) {
   uploadRunning = false;
   resetUI();
+  $('progressWrap').style.display = 'none';
+  if (data.loginExpired) {
+    loadAccounts();
+    setStatus('error', '登录过期');
+  }
   if (data.success) {
     const pct = Math.round((data.results / data.total) * 100);
     toast('完成: ' + data.results + '/' + data.total + ' (' + pct + '%)', 'success');
@@ -519,11 +725,15 @@ function onUploadEnd(data) {
   } else {
     toast('上传失败: ' + (data.error || '未知错误'), 'error');
   }
+  // Show retry button if any failed
+  const hasFailed = entries.some(e => e._uploadStatus === 'fail');
+  $('retryBtn').style.display = hasFailed ? '' : 'none';
 }
 
 function resetUI() {
   $('startBtn').disabled = false;
   $('stopBtn').disabled = true;
+  $('progressWrap').style.display = 'none';
   if (!uploadRunning) setStatus('idle', '就绪');
 }
 
@@ -555,6 +765,22 @@ async function loadAccounts() {
   accounts = await res.json();
   renderAccounts();
   renderAccountSelect();
+
+  // Auto-verify stale accounts in parallel (>1 hour since last check)
+  const stale = accounts.filter(a => !a.lastLogin || Date.now() - new Date(a.lastLogin).getTime() >= 3600000);
+  if (stale.length > 0) {
+    const results = await Promise.allSettled(stale.map(a =>
+      api(`/api/accounts/${a.name}/verify`, { method: 'POST' }).then(r => r.json().then(d => ({ name: a.name, data: d })))
+    ));
+    results.forEach(r => {
+      if (r.status === 'fulfilled') {
+        const acct = accounts.find(ac => ac.name === r.value.name);
+        if (acct) acct.status = r.value.data.valid ? 'ready' : 'needs-login';
+      }
+    });
+  }
+  renderAccounts();
+  renderAccountSelect();
 }
 
 function renderAccounts() {
@@ -580,6 +806,7 @@ function renderAccounts() {
       </div>
       <div class="acct-actions">
         ${a.status !== 'ready' ? '<button class="btn btn-primary btn-sm" data-login="' + esc(a.name) + '">扫码登录</button>' : ''}
+        <button class="btn btn-ghost btn-sm" data-verify="' + esc(a.name) + '">验证</button>
         <button class="btn btn-ghost btn-sm" data-rename="' + esc(a.name) + '">改名</button>
         ${a.name !== 'default' ? '<button class="btn btn-ghost btn-sm" style="color:var(--red)" data-delete="' + esc(a.name) + '">删除</button>' : ''}
       </div>
@@ -587,6 +814,7 @@ function renderAccounts() {
 
     // Event handlers
     card.querySelector('[data-login]')?.addEventListener('click', () => loginAccount(a.name));
+    card.querySelector('[data-verify]')?.addEventListener('click', () => verifyAccount(a.name));
     card.querySelector('[data-rename]')?.addEventListener('click', () => editAccountLabel(a.name));
     card.querySelector('[data-delete]')?.addEventListener('click', () => deleteAccount(a.name));
 
@@ -618,13 +846,86 @@ async function editAccountLabel(name) {
   await loadAccounts();
 }
 
+async function verifyAccount(name) {
+  const card = document.querySelector(`[data-verify="${esc(name)}"]`);
+  if (card) { card.disabled = true; card.textContent = '验证中…'; }
+  try {
+    const vRes = await api(`/api/accounts/${name}/verify`, { method: 'POST' });
+    if (vRes.ok) {
+      const vData = await vRes.json();
+      const acct = accounts.find(a => a.name === vData.name);
+      if (acct) { acct.status = vData.valid ? 'ready' : 'needs-login'; acct.lastLogin = new Date().toISOString(); }
+      toast(vData.valid ? '登录状态有效' : '登录已过期，请重新扫码', vData.valid ? 'success' : 'error');
+      renderAccounts();
+      renderAccountSelect();
+    }
+  } catch { toast('验证失败', 'error'); }
+  if (card) { card.disabled = false; card.textContent = '验证'; }
+}
+
 async function loginAccount(name) {
-  const res = await api('/api/accounts/' + name + '/login', { method: 'POST' });
-  if (!res.ok) return toast('打开浏览器失败', 'error');
-  toast('浏览器已打开，请扫码登录后点击确定', 'info');
-  alert('浏览器已打开，请扫码登录。\n完成后点击确定。');
-  await api('/api/accounts/' + name + '/login/done', { method: 'POST' });
-  await loadAccounts();
+  showModal('扫码登录', '<div style="text-align:center;padding:12px"><p>正在获取二维码…</p></div>', null);
+  $('modalOk').style.display = 'none';
+
+  let pollTimer = null;
+  const stopPolling = () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    api('/api/accounts/' + name + '/qrcode/cancel', { method: 'POST' }).catch(() => {});
+  };
+
+  try {
+    const res = await api('/api/accounts/' + name + '/qrcode', { method: 'POST' });
+    if (!res.ok) {
+      $('modalOverlay').style.display = 'none';
+      toast('获取二维码失败', 'error');
+      return;
+    }
+    const data = await res.json();
+
+    $('modalBody').innerHTML = `
+      <div style="text-align:center">
+        <img src="${data.qrcode}" style="max-width:280px;width:100%;border-radius:8px;border:1px solid var(--border)" alt="QR Code">
+        <p style="margin-top:14px;color:var(--text-secondary);font-size:13px">请使用微信扫码登录</p>
+        <p id="qrStatus" style="font-size:11px;color:var(--text-tertiary);margin-top:6px">等待扫码…</p>
+      </div>
+    `;
+
+    pollTimer = setInterval(async () => {
+      if ($('modalOverlay').style.display === 'none') { stopPolling(); return; }
+      try {
+        const sRes = await api('/api/accounts/' + name + '/qrcode/status');
+        if (!sRes.ok) return;
+        const status = await sRes.json();
+        const statusEl = $('qrStatus');
+        if (status.status === 'done') {
+          stopPolling();
+          if (statusEl) statusEl.innerHTML = '<span style="color:var(--green)">登录成功！</span>';
+          $('modalOverlay').style.display = 'none';
+          modalCallback = null;
+          toast('登录成功', 'success');
+          await loadAccounts();
+        } else if (status.status === 'scanned') {
+          if (statusEl) statusEl.innerHTML = '<span style="color:var(--green)">已扫码，请在手机上确认登录</span>';
+        } else if (status.status === 'expired') {
+          stopPolling();
+          if (statusEl) statusEl.innerHTML = '<span style="color:var(--yellow)">二维码已过期</span>';
+          const btn = document.createElement('button');
+          btn.className = 'btn btn-primary btn-sm';
+          btn.style.cssText = 'margin-top:10px';
+          btn.textContent = '刷新二维码';
+          btn.addEventListener('click', () => {
+            $('modalOverlay').style.display = 'none';
+            modalCallback = null;
+            setTimeout(() => loginAccount(name), 300);
+          });
+          statusEl.parentElement.appendChild(btn);
+        }
+      } catch {}
+    }, 3000);
+  } catch (e) {
+    $('modalOverlay').style.display = 'none';
+    toast('获取二维码失败: ' + e.message, 'error');
+  }
 }
 
 async function deleteAccount(name) {
@@ -690,9 +991,17 @@ async function refreshResults() {
 
 function renderResultsTable() {
   const tb = document.querySelector('#resultsTable tbody');
-  const filtered = currentFilter === 'all'
+  const search = ($('resultSearch')?.value || '').toLowerCase();
+  let filtered = currentFilter === 'all'
     ? allResults
     : allResults.filter(r => (r.status || '').toLowerCase() === currentFilter);
+  if (search) {
+    filtered = filtered.filter(r =>
+      (r.title || '').toLowerCase().includes(search) ||
+      (r.video_path || '').toLowerCase().includes(search) ||
+      (r.error || '').toLowerCase().includes(search)
+    );
+  }
 
   if (filtered.length === 0) {
     tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-tertiary);padding:30px;font-size:13px">暂无发布记录</td></tr>';
@@ -708,6 +1017,16 @@ function renderResultsTable() {
     '</tr>';
   }).join('');
 }
+document.addEventListener('DOMContentLoaded', () => {
+  const searchEl = $('resultSearch');
+  if (searchEl) searchEl.addEventListener('input', renderResultsTable);
+  // 默认定时发布时间设为当前时间（本地时区），禁止选择过去时间
+  if ($('formTime')) {
+    const localStr = toLocalDatetime(new Date());
+    $('formTime').min = localStr;
+    if (!$('formTime').value) $('formTime').value = localStr;
+  }
+});
 
 $('refreshResultsBtn').addEventListener('click', refreshResults);
 $('exportResultsBtn').addEventListener('click', async () => {
@@ -721,7 +1040,9 @@ $('exportResultsBtn').addEventListener('click', async () => {
     }).join(','))
   ].join('\n');
   const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'results.csv'; a.click();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'results.csv'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 100);
 });
 
 /* ═══════════════════════════════════════════════
@@ -776,6 +1097,28 @@ document.addEventListener('keydown', function(e) {
     switchView(viewMap[e.key]);
   }
 });
+
+/* ═══════════════════════════════════════════════
+   THEME TOGGLE
+   ═══════════════════════════════════════════════ */
+(function() {
+  const KEY = 'theme';
+  const saved = localStorage.getItem(KEY);
+  if (saved === 'dark') document.body.setAttribute('data-theme', 'dark');
+  $('themeToggle').addEventListener('click', () => {
+    const isDark = document.body.getAttribute('data-theme') === 'dark';
+    if (isDark) {
+      document.body.removeAttribute('data-theme');
+      localStorage.setItem(KEY, 'light');
+      $('themeToggle').textContent = '🌙';
+    } else {
+      document.body.setAttribute('data-theme', 'dark');
+      localStorage.setItem(KEY, 'dark');
+      $('themeToggle').textContent = '☀️';
+    }
+  });
+  $('themeToggle').textContent = saved === 'dark' ? '☀️' : '🌙';
+})();
 
 /* ═══════════════════════════════════════════════
    INIT
