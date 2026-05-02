@@ -342,37 +342,26 @@ async def login_flow(browser_context):
 
 # ── Upload helpers ──
 async def wait_for_upload_with_progress(page, abort_signal):
-    """Wait for video upload to complete (max 600s), polling every 10s.
-    检测上传完成：进度条出现 + 消失（表示上传结束），或文件预览出现。"""
+    """Wait for video upload to complete by monitoring network activity.
+    After set_input_files, upload generates continuous network traffic.
+    When network goes idle for 500ms, upload is complete."""
     start_time = time.time()
-    progress_seen = False
     while time.time() - start_time < 600:
         if _check_abort(abort_signal):
             logger.warn('  Upload aborted by user')
             return 'aborted'
         try:
-            # 多种进度选择器
-            has_progress = await page.locator('.ant-slider, .progress, [class*="progress"], [class*="upload"]').count() > 0
-            if has_progress:
-                progress_seen = True
-            # 检查上传完成：文件预览区域出现视频缩略图
-            has_thumbnail = await page.locator('video, .video-preview, [class*="preview"] video, .uploaded-video').count() > 0
-            if has_thumbnail and progress_seen:
-                elapsed = round(time.time() - start_time)
-                logger.info(f'  Upload complete ({elapsed}s)')
-                return 'ok'
-            # 如果进度条从出现到消失，也认为上传完成
-            if progress_seen and not has_progress:
-                elapsed = round(time.time() - start_time)
-                logger.info(f'  Upload finished ({elapsed}s)')
-                return 'ok'
+            await page.wait_for_load_state('networkidle', timeout=15000)
+            elapsed = round(time.time() - start_time)
+            logger.info(f'  Upload complete ({elapsed}s)')
+            return 'ok'
         except Exception:
             pass
         elapsed = round(time.time() - start_time)
         if elapsed % 30 == 0:
             logger.info(f'  Uploading... {elapsed}s')
-        await page.wait_for_timeout(10000)
     logger.warn('  Upload timeout (600s), continuing')
+    return 'timeout'
 
 
 async def select_short_drama(page, drama_name):
@@ -566,6 +555,10 @@ async def process_video(browser_context, record):
         if upload_result == 'aborted':
             result['status'] = 'failed'
             result['error'] = 'Aborted by user'
+            return result
+        if upload_result == 'timeout':
+            result['status'] = 'failed'
+            result['error'] = 'Upload timed out'
             return result
         await page.wait_for_timeout(5000)
         if is_login(page.url):
