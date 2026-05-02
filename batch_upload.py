@@ -342,25 +342,39 @@ async def login_flow(browser_context):
 
 # ── Upload helpers ──
 async def wait_for_upload_with_progress(page, abort_signal):
-    """Wait for video upload to complete by monitoring network activity.
-    After set_input_files, upload generates continuous network traffic.
-    When network goes idle for 500ms, upload is complete."""
+    """Wait for video upload via network activity detection.
+    Phase 1: wait for network to become BUSY (upload started).
+    Phase 2: wait for network to become IDLE (upload complete).
+    This prevents false positives where the network is already idle."""
     start_time = time.time()
+    network_was_busy = False
+
     while time.time() - start_time < 600:
         if _check_abort(abort_signal):
             logger.warn('  Upload aborted by user')
             return 'aborted'
         try:
-            await page.wait_for_load_state('networkidle', timeout=15000)
-            elapsed = round(time.time() - start_time)
-            logger.info(f'  Upload complete ({elapsed}s)')
-            return 'ok'
+            # Try to wait for network idle with 3s timeout
+            await page.wait_for_load_state('networkidle', timeout=3000)
+            # Network is idle
+            if network_was_busy:
+                elapsed = round(time.time() - start_time)
+                logger.info(f'  Upload complete ({elapsed}s)')
+                return 'ok'
+            # Haven't seen network busy yet — upload might not have started
         except Exception:
-            pass
+            # Timeout = network is BUSY = upload is happening
+            network_was_busy = True
+
         elapsed = round(time.time() - start_time)
-        if elapsed % 30 == 0:
+        if elapsed % 30 == 0 and network_was_busy:
             logger.info(f'  Uploading... {elapsed}s')
-    logger.warn('  Upload timeout (600s), continuing')
+
+    if network_was_busy:
+        logger.warn('  Upload timeout (600s)')
+        return 'timeout'
+    logger.info('  Upload complete (instant/no network)')
+    return 'ok'
     return 'timeout'
 
 
