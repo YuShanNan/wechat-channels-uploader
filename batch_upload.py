@@ -589,7 +589,27 @@ async def process_video(browser_context, record):
         video_path = record.get('video_path', '')
         if not os.path.exists(video_path):
             raise Exception(f'File not found: {video_path}')
+
+        # 诊断：有多少 file input，分别是什么
+        fi_count = await page.locator('input[type=file]').count()
+        logger.info(f'  File inputs on page: {fi_count}')
+        for idx in range(min(fi_count, 4)):
+            try:
+                attr = await page.locator('input[type=file]').nth(idx).get_attribute('accept') or '(none)'
+                logger.info(f'    input[{idx}] accept="{attr}"')
+            except Exception:
+                pass
+
         await page.locator('input[type=file]').first.set_input_files(video_path)
+        # 确认文件确实被 attach 了
+        try:
+            file_count = await page.locator('input[type=file]').first.evaluate('el => el.files.length')
+            logger.info(f'  Files attached to input: {file_count}')
+            if file_count == 0:
+                logger.warn('  WARNING: No files attached — set_input_files may have failed silently')
+        except Exception:
+            pass
+
         upload_result = await wait_for_upload_with_progress(page, record.get('_abortSignal'))
         if upload_result == 'aborted':
             result['status'] = 'failed'
