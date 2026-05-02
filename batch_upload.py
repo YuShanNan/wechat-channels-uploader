@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from shutil import which as shutil_which
 
 from playwright.async_api import async_playwright
 
@@ -157,11 +158,15 @@ def load_published_titles(results_path, resume):
 def probe_video(file_path):
     """Use ffprobe to get video metadata."""
     try:
+        if not shutil_which('ffprobe'):
+            return None
         result = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-print_format', 'json',
              '-show_format', '-show_streams', file_path],
             capture_output=True, text=True, timeout=15
         )
+        if not result.stdout:
+            return None
         data = json.loads(result.stdout)
         streams = data.get('streams', []) or []
         vs = None
@@ -337,24 +342,37 @@ async def login_flow(browser_context):
 
 # ── Upload helpers ──
 async def wait_for_upload_with_progress(page, abort_signal):
-    """Wait for upload progress bar to appear (up to 300s), polling every 15s."""
+    """Wait for video upload to complete (max 600s), polling every 10s.
+    检测上传完成：进度条出现 + 消失（表示上传结束），或文件预览出现。"""
     start_time = time.time()
-    while time.time() - start_time < 300:
+    progress_seen = False
+    while time.time() - start_time < 600:
         if _check_abort(abort_signal):
             logger.warn('  Upload aborted by user')
             return 'aborted'
         try:
-            count = await page.locator('.ant-slider').count()
-            if count > 0:
+            # 多种进度选择器
+            has_progress = await page.locator('.ant-slider, .progress, [class*="progress"], [class*="upload"]').count() > 0
+            if has_progress:
+                progress_seen = True
+            # 检查上传完成：文件预览区域出现视频缩略图
+            has_thumbnail = await page.locator('video, .video-preview, [class*="preview"] video, .uploaded-video').count() > 0
+            if has_thumbnail and progress_seen:
                 elapsed = round(time.time() - start_time)
                 logger.info(f'  Upload complete ({elapsed}s)')
+                return 'ok'
+            # 如果进度条从出现到消失，也认为上传完成
+            if progress_seen and not has_progress:
+                elapsed = round(time.time() - start_time)
+                logger.info(f'  Upload finished ({elapsed}s)')
                 return 'ok'
         except Exception:
             pass
         elapsed = round(time.time() - start_time)
-        logger.info(f'  Uploading... {elapsed}s')
-        await page.wait_for_timeout(15000)
-    logger.warn('  Upload timeout (300s), continuing')
+        if elapsed % 30 == 0:
+            logger.info(f'  Uploading... {elapsed}s')
+        await page.wait_for_timeout(10000)
+    logger.warn('  Upload timeout (600s), continuing')
 
 
 async def select_short_drama(page, drama_name):
@@ -450,10 +468,10 @@ async def verify_publish(page):
 # ── Main upload logic ──
 async def process_video(browser_context, record):
     """Process a single video record: upload, fill metadata, and publish."""
-    pages = browser_context.pages
+    pages = [p for p in browser_context.pages if not p.is_closed()]
     page = pages[0] if pages else None
     if not page:
-        logger.warn('  No page in context, creating new page...')
+        logger.warn('  No live page, creating new page...')
         page = await browser_context.new_page()
 
     result = {
@@ -516,8 +534,8 @@ async def process_video(browser_context, record):
                                 wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(3000)
 
-        # 等待上传区域出现 — 先截图确认页面状态
-        file_input = page.locator('input[type=file]').first
+        # 等待上传区域出现 — 视频 input 通常是页面上最后一个 file input
+        file_input = page.locator('input[type=file]').last
         try:
             await file_input.wait_for(state='attached', timeout=15000)
         except Exception:
@@ -543,7 +561,7 @@ async def process_video(browser_context, record):
         video_path = record.get('video_path', '')
         if not os.path.exists(video_path):
             raise Exception(f'File not found: {video_path}')
-        await page.locator('input[type=file]').first.set_input_files(video_path)
+        await page.locator('input[type=file]').last.set_input_files(video_path)
         upload_result = await wait_for_upload_with_progress(page, record.get('_abortSignal'))
         if upload_result == 'aborted':
             result['status'] = 'failed'
@@ -643,11 +661,13 @@ async def batch_upload(browser_context, records, options=None):
     published_set = load_published_titles(results_path, resume)
     login_expired_flag = False
 
-    # Close extra tabs, ensure at least one page exists
+    # Close extra tabs, ensure at least one LIVE page exists
     pages = browser_context.pages
     for i in range(len(pages) - 1, 0, -1):
         await pages[i].close()
-    if len(browser_context.pages) == 0:
+    # 过滤掉已关闭的页面
+    live = [p for p in browser_context.pages if not p.is_closed()]
+    if not live:
         await browser_context.new_page()
 
     total = len(records)
