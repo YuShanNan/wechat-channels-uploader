@@ -537,8 +537,8 @@ async def process_video(browser_context, record):
                                 wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(3000)
 
-        # 等待上传区域出现 — 视频 input 通常是页面上最后一个 file input
-        file_input = page.locator('input[type=file]').last
+        # 等待上传区域出现
+        file_input = page.locator('input[type=file]').first
         try:
             await file_input.wait_for(state='attached', timeout=15000)
         except Exception:
@@ -564,7 +564,7 @@ async def process_video(browser_context, record):
         video_path = record.get('video_path', '')
         if not os.path.exists(video_path):
             raise Exception(f'File not found: {video_path}')
-        await page.locator('input[type=file]').last.set_input_files(video_path)
+        await page.locator('input[type=file]').first.set_input_files(video_path)
         upload_result = await wait_for_upload_with_progress(page, record.get('_abortSignal'))
         if upload_result == 'aborted':
             result['status'] = 'failed'
