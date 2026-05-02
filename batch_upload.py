@@ -294,9 +294,13 @@ async def init_browser(profile_dir, headless=True):
     if _pw_path and os.path.isdir(_pw_path):
         os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', _pw_path)
     p = await async_playwright().start()
+    args = []
+    if headless:
+        args.append('--headless=new')
     context = await p.chromium.launch_persistent_context(
         profile_dir,
-        headless=headless,
+        headless=False,
+        args=args,
         viewport={'width': 1440, 'height': 900},
         locale='zh-CN'
     )
