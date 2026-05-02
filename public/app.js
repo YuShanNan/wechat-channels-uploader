@@ -1199,6 +1199,9 @@ document.addEventListener('keydown', function(e) {
 /* ═══════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════ */
+fetch('/api/version').then(r => r.json()).then(d => {
+  $('sidebarVersion').textContent = 'v' + (d.version || '0.0.0');
+}).catch(() => {});
 connectWS();
 loadAccounts();
 loadDashboard();

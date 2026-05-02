@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PyInstaller build script - packages the app into a folder distribution"""
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -52,9 +53,20 @@ def clean():
         os.remove(f)
 
 
+def read_version():
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(base, 'version.json'), 'r', encoding='utf-8') as f:
+            return json.load(f).get('version', '0.0.0')
+    except Exception:
+        return '0.0.0'
+
+
 def build():
     base = os.path.dirname(os.path.abspath(__file__))
     os.chdir(base)
+    version = read_version()
+    print(f'[INFO] Building version: {version}')
 
     # Find chromium version
     chromium_ver = find_chromium_version()
@@ -85,6 +97,8 @@ def build():
         '--noconsole',
         '--name', '视频号批量上传',
         '--add-data', f'public{os.pathsep}public',
+        '--add-data', f'version.json{os.pathsep}.',
+        '--add-data', f'accounts.json{os.pathsep}.',
         '--collect-submodules', 'flask_socketio',
         '--collect-submodules', 'engineio.async_drivers.threading',
         '--hidden-import', 'engineio.async_drivers.threading',
@@ -146,6 +160,7 @@ def build():
                 except OSError:
                     pass
         print(f'[SUCCESS] Build complete: {dist_dir}')
+        print(f'[INFO] Version: {version}')
         print(f'[INFO] Total size: {total / (1024*1024*1024):.2f} GB')
     else:
         print('[ERROR] exe not found at expected path')

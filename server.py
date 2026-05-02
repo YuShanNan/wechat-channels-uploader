@@ -150,9 +150,7 @@ def on_disconnect():
 
 
 def run_async_sync(coro):
-    """Run an async coroutine synchronously (blocks current thread)."""
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
@@ -385,38 +383,41 @@ def api_verify(name):
 
 
 async def _verify_async(name, acct):
-    """Verify login status by navigating to post/create page.
-    等待页面稳定，客户端重定向可能在 DOMContentLoaded 之后才触发
-    """
-    # Close any existing context to free profile lock
-    existing = active_contexts.pop(name, None)
-    if existing is not None:
+    """快速验证登录态：复用已有 context，导航到轻量页面"""
+
+    # 如果已有打开的浏览器上下文，直接复用
+    ctx = active_contexts.get(name)
+    if ctx is not None:
         try:
-            await existing.close()
+            page = await ctx.new_page()
+            await page.goto('https://channels.weixin.qq.com',
+                            wait_until='commit', timeout=8000)
+            await page.wait_for_timeout(1500)
+            current_url = page.url
+            expired = is_login(current_url)
+            if expired:
+                updateAccountStatus(name, 'needs-login')
+            else:
+                updateAccountStatus(name, 'ready')
+            await page.close()
+            return {'name': name, 'valid': not expired}
         except Exception:
             pass
 
+    # 没有现成 context，启动 headless 浏览器
     await unlock_profile(acct['profileDir'])
     ctx = await init_browser(acct['profileDir'], headless=True)
     try:
-        if len(ctx.pages) == 0:
-            await ctx.close()
-            raise Exception('浏览器启动失败，profile 可能被占用')
-
-        page = ctx.pages[0]
-        await page.goto('https://channels.weixin.qq.com/platform/post/create',
-                        wait_until='domcontentloaded', timeout=15000)
-        # 等待页面稳定，客户端重定向可能在 DOMContentLoaded 之后才触发
-        await page.wait_for_timeout(5000)
+        page = ctx.pages[0] if len(ctx.pages) > 0 else await ctx.new_page()
+        await page.goto('https://channels.weixin.qq.com',
+                        wait_until='commit', timeout=8000)
+        await page.wait_for_timeout(1500)
         current_url = page.url
         expired = is_login(current_url)
         if expired:
             updateAccountStatus(name, 'needs-login')
-            logger.info(f'Account {acct["label"]}: login expired')
         else:
             updateAccountStatus(name, 'ready')
-            logger.info(
-                f'Account {acct["label"]}: login valid (url: {current_url})')
 
         return {'name': name, 'valid': not expired}
     finally:
@@ -743,6 +744,18 @@ def static_files(path):
     if os.path.exists(public_path):
         return send_from_directory(public_dir, path)
     return send_from_directory(public_dir, 'index.html')
+
+
+@app.route('/api/version')
+def api_version():
+    try:
+        path = os.path.join(RES_DIR, 'version.json')
+        if not os.path.exists(path):
+            path = os.path.join(BASE_DIR, 'version.json')
+        with open(path, 'r', encoding='utf-8') as f:
+            return jsonify(json.load(f))
+    except Exception:
+        return jsonify({'version': '0.0.0'})
 
 
 # ══════════════════════════════════════════════
