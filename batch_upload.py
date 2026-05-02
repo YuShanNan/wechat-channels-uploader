@@ -342,39 +342,64 @@ async def login_flow(browser_context):
 
 # ── Upload helpers ──
 async def wait_for_upload_with_progress(page, abort_signal):
-    """Wait for video upload via network activity detection.
-    Phase 1: wait for network to become BUSY (upload started).
-    Phase 2: wait for network to become IDLE (upload complete).
-    This prevents false positives where the network is already idle."""
+    """Wait for video upload to complete by detecting page changes.
+    先检测上传是否已启动（页面出现进度/文件名等变化），再等上传完成。
+    不依赖 networkidle，因为页面背景流量会干扰检测。"""
     start_time = time.time()
-    network_was_busy = False
 
-    while time.time() - start_time < 600:
+    # 通用上传进度/完成选择器
+    progress_selectors = [
+        'progress', '[class*="progress"]', '[class*="upload"]',
+        '[class*="loading"]', '.ant-slider', '.weui-desktop-progress',
+        '[class*="percent"]',
+        'text=/上传中|uploading|\\d+%/i',
+    ]
+    done_selectors = [
+        'video', 'video[src]', '[class*="preview"] video',
+        '[class*="success"]', '[class*="done"]',
+        'text=/上传成功|upload.*complete|success/i',
+    ]
+
+    upload_started = False
+
+    while time.time() - start_time < 900:
         if _check_abort(abort_signal):
             logger.warn('  Upload aborted by user')
             return 'aborted'
-        try:
-            # Try to wait for network idle with 3s timeout
-            await page.wait_for_load_state('networkidle', timeout=3000)
-            # Network is idle
-            if network_was_busy:
-                elapsed = round(time.time() - start_time)
-                logger.info(f'  Upload complete ({elapsed}s)')
-                return 'ok'
-            # Haven't seen network busy yet — upload might not have started
-        except Exception:
-            # Timeout = network is BUSY = upload is happening
-            network_was_busy = True
+
+        # 检测上传是否在进行中
+        if not upload_started:
+            for sel in progress_selectors:
+                try:
+                    if await page.locator(sel).count() > 0:
+                        upload_started = True
+                        break
+                except Exception:
+                    pass
+
+        # 检测上传是否已完成
+        for sel in done_selectors:
+            try:
+                if await page.locator(sel).count() > 0:
+                    if upload_started:
+                        elapsed = round(time.time() - start_time)
+                        logger.info(f'  Upload complete ({elapsed}s)')
+                        return 'ok'
+            except Exception:
+                pass
 
         elapsed = round(time.time() - start_time)
-        if elapsed % 30 == 0 and network_was_busy:
-            logger.info(f'  Uploading... {elapsed}s')
+        if elapsed % 30 == 0:
+            tag = 'Uploading' if upload_started else 'Waiting for upload'
+            logger.info(f'  {tag}... {elapsed}s')
 
-    if network_was_busy:
-        logger.warn('  Upload timeout (600s)')
+        await page.wait_for_timeout(5000)
+
+    if upload_started:
+        logger.warn('  Upload timeout (900s)')
         return 'timeout'
-    logger.info('  Upload complete (instant/no network)')
-    return 'ok'
+    logger.warn('  Upload never started')
+    return 'not_started'
     return 'timeout'
 
 
@@ -570,9 +595,10 @@ async def process_video(browser_context, record):
             result['status'] = 'failed'
             result['error'] = 'Aborted by user'
             return result
-        if upload_result == 'timeout':
+        if upload_result in ('timeout', 'not_started'):
             result['status'] = 'failed'
-            result['error'] = 'Upload timed out'
+            result['error'] = 'Upload timed out' if upload_result == 'timeout' else 'Upload never started'
+            result['_errorType'] = 'upload-failed'
             return result
         await page.wait_for_timeout(5000)
         if is_login(page.url):
@@ -735,7 +761,7 @@ async def batch_upload(browser_context, records, options=None):
                 await asyncio.sleep(3)
             result = await process_video(browser_context, record)
             if result['status'] == 'published' or result.get('_errorType') in (
-                    'login-expired', 'title-error'):
+                    'login-expired', 'title-error', 'upload-failed'):
                 break
 
         results.append(result)
